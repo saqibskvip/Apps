@@ -15,18 +15,24 @@ const fetchLiveScores = async () => {
     const res = await fetch('https://api-football-v1.p.rapidapi.com/v3/fixtures?live=all', {
       method: 'GET',
       headers: {
-        'X-RapidAPI-Key': '84f51ce12emshe4194f0279a2d70p18cf3cjsnf1d138586f3c',
-        'X-RapidAPI-Host': 'api-football-v1.p.rapidapi.com'
+        'X-RapidAPI-Key': process.env.RAPIDAPI_KEY,
+        'X-RapidAPI-Host': 'api-football-v1.p.rapidapi.com',
       }
     });
 
     const data = await res.json();
+
+    if (!data || !data.response || !Array.isArray(data.response)) {
+      console.warn('⚠️ Invalid or empty live score data:', data);
+      return; // Don't try to set undefined
+    }
+
     await db.ref('liveScores').set(data.response);
-    console.log(`✅ Live scores updated at ${new Date().toISOString()}`);
+    console.log(`✅ Live scores updated at ${new Date().toLocaleTimeString()}`);
   } catch (e) {
     console.error('❌ Error fetching live scores:', e.message);
   }
-};
+}; 
 
 // Fetch every 1 minute
 setInterval(fetchLiveScores, 60 * 1000);
