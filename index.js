@@ -9,39 +9,31 @@ admin.initializeApp({
 
 const db = admin.database();
 
-const isToday = (timestamp) => {
-  const today = new Date();
-  const date = new Date(Number(timestamp));
-  return (
-    date.getDate() === today.getDate() &&
-    date.getMonth() === today.getMonth() &&
-    date.getFullYear() === today.getFullYear()
-  );
-};
-
-const getTodayTipsTeams = async () => {
+const getAllTipMatches = async () => {
   const snapshot = await db.ref('tips').once('value');
   const tipsData = snapshot.val() || {};
-  const todayTeams = new Set();
+  const allKeys = new Set();
 
   for (const sectionKey in tipsData) {
     const tips = Object.values(tipsData[sectionKey] || {});
     for (const tip of tips) {
-      if (isToday(tip.matchDate)) {
-        const matchKey = `${tip.team1.toLowerCase()}_${tip.team2.toLowerCase()}`;
-        todayTeams.add(matchKey);
+      const team1 = (tip.team1 || '').toLowerCase().trim();
+      const team2 = (tip.team2 || '').toLowerCase().trim();
+      if (team1 && team2) {
+        allKeys.add(`${team1}_${team2}`);
       }
     }
   }
 
-  return todayTeams;
+  return allKeys;
 };
 
 const fetchLiveScores = async () => {
   try {
-    const todayTeams = await getTodayTipsTeams();
-    if (todayTeams.size === 0) {
-      console.log('🛑 No today tips found — clearing liveScores');
+    const tipMatchKeys = await getAllTipMatches();
+
+    if (tipMatchKeys.size === 0) {
+      console.log('🛑 No tips found — clearing liveScores');
       await db.ref('liveScores').remove();
       return;
     }
@@ -55,22 +47,28 @@ const fetchLiveScores = async () => {
     });
 
     const data = await res.json();
-    const allLive = data.response || [];
+    const liveData = data.response || [];
 
-    // Match by team1 + team2 combo
-    const filteredLive = allLive.filter((match) => {
-      const team1 = match.teams?.home?.name?.toLowerCase();
-      const team2 = match.teams?.away?.name?.toLowerCase();
-      const key = `${team1}_${team2}`;
-      return todayTeams.has(key);
+    // Add existing scores from Firebase (even if not live anymore)
+    const existingSnap = await db.ref('liveScores').once('value');
+    const existingScores = existingSnap.val() || [];
+
+    // Combine existing + live (prevent duplicates)
+    const combined = [...existingScores, ...liveData];
+
+    // Filter only those that exist in Tips
+    const finalScores = combined.filter((match) => {
+      const team1 = match.teams?.home?.name?.toLowerCase().trim();
+      const team2 = match.teams?.away?.name?.toLowerCase().trim();
+      return tipMatchKeys.has(`${team1}_${team2}`);
     });
 
-    await db.ref('liveScores').set(filteredLive);
-    console.log(`✅ ${filteredLive.length} live scores saved at ${new Date().toLocaleTimeString()}`);
+    await db.ref('liveScores').set(finalScores);
+    console.log(`✅ Filtered ${finalScores.length} scores at ${new Date().toLocaleTimeString()}`);
   } catch (e) {
     console.error('❌ Error fetching live scores:', e.message);
   }
 };
 
-// Run every 1 min
+// Run every 1 minute
 setInterval(fetchLiveScores, 60 * 1000);
