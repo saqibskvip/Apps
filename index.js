@@ -10,6 +10,36 @@ admin.initializeApp({
 
 const db = admin.database();
 
+// ⛔ Remove any liveScores not matching tips
+const filterLiveScoresByTips = async () => {
+  const tipsSnap = await db.ref('tips').once('value');
+  const allTips = tipsSnap.val() || {};
+
+  const validPairs = new Set();
+
+  Object.values(allTips).forEach((section) => {
+    Object.values(section || {}).forEach((tip) => {
+      if (tip.team1 && tip.team2) {
+        validPairs.add(`${tip.team1.toLowerCase()} vs ${tip.team2.toLowerCase()}`);
+      }
+    });
+  });
+
+  const liveSnap = await db.ref('liveScores').once('value');
+  const allLiveScores = liveSnap.val();
+
+  if (!allLiveScores || !Array.isArray(allLiveScores)) return;
+
+  const filtered = allLiveScores.filter((match) => {
+    const home = match.teams?.home?.name?.toLowerCase();
+    const away = match.teams?.away?.name?.toLowerCase();
+    if (!home || !away) return false;
+    return validPairs.has(`${home} vs ${away}`);
+  });
+
+  await db.ref('liveScores').set(filtered);
+};
+
 const fetchLiveScores = async () => {
   try {
     const res = await fetch('https://api-football-v1.p.rapidapi.com/v3/fixtures?live=all', {
@@ -27,7 +57,6 @@ const fetchLiveScores = async () => {
       return;
     }
 
-    // Optional: skip if no live matches
     if (data.response.length === 0) {
       console.log('ℹ️ No live matches at this time');
       return;
@@ -35,6 +64,10 @@ const fetchLiveScores = async () => {
 
     await db.ref('liveScores').set(data.response);
     console.log(`✅ Live scores updated at ${new Date().toLocaleTimeString()}`);
+
+    // 🔍 Now clean up non-matching live scores
+    await filterLiveScoresByTips();
+
   } catch (e) {
     console.error('❌ Error fetching live scores:', e.message);
   }
