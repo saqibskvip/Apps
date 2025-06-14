@@ -22,9 +22,15 @@ const fetchLiveScores = async () => {
 
     const data = await res.json();
 
-    if (!data || !data.response || !Array.isArray(data.response)) {
-      console.warn('⚠️ Invalid or empty live score data:', data);
-      return; // Don't try to set undefined
+    if (!data || !Array.isArray(data.response)) {
+      console.log('⚠️ No valid data returned or response is not an array');
+      return;
+    }
+
+    // Optional: skip if no live matches
+    if (data.response.length === 0) {
+      console.log('ℹ️ No live matches at this time');
+      return;
     }
 
     await db.ref('liveScores').set(data.response);
@@ -32,7 +38,7 @@ const fetchLiveScores = async () => {
   } catch (e) {
     console.error('❌ Error fetching live scores:', e.message);
   }
-}; 
+};
 
 // Fetch every 1 minute
 setInterval(fetchLiveScores, 60 * 1000);
