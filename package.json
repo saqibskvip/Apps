@@ -1,0 +1,12 @@
+{
+  "name": "live-score-fetcher",
+  "version": "1.0.0",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "firebase-admin": "^11.5.0",
+    "node-fetch": "^2.6.7"
+  }
+}
