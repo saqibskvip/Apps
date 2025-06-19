@@ -9,10 +9,10 @@ admin.initializeApp({
 
 const db = admin.database();
 
-// Utility to normalize text for partial matching
+// Normalize names for matching
 const normalize = (str) => str?.toLowerCase().replace(/\s+/g, '').trim() || '';
 
-// Fetch all tips and prepare simplified keys for fuzzy match
+// Load all tips to prepare matching
 const getAllTipMatchKeys = async () => {
   const snapshot = await db.ref('tips').once('value');
   const tipsData = snapshot.val() || {};
@@ -34,14 +34,16 @@ const getAllTipMatchKeys = async () => {
   return matchTips;
 };
 
+// Loose contains match
 const isMatch = (apiName, tipName) =>
   normalize(apiName).includes(tipName) || tipName.includes(normalize(apiName));
 
+// Main fetcher
 const fetchLiveScores = async () => {
   try {
     const tips = await getAllTipMatchKeys();
 
-    const response = await fetch('https://api-football-v1.p.rapidapi.com/v3/fixtures?live=all', {
+    const response = await fetch('https://api-football-v1.p.rapidapi.com/v3/fixtures?date=2025-06-18', {
       method: 'GET',
       headers: {
         'X-RapidAPI-Key': process.env.RAPIDAPI_KEY,
@@ -50,41 +52,59 @@ const fetchLiveScores = async () => {
     });
 
     const result = await response.json();
-    const liveMatches = Array.isArray(result.response) ? result.response : [];
+    const allMatches = Array.isArray(result.response) ? result.response : [];
 
-    const matchedScores = [];
+    const matchedMap = new Map();
 
-    for (const match of liveMatches) {
+    for (const match of allMatches) {
       const apiTeam1 = match?.teams?.home?.name;
       const apiTeam2 = match?.teams?.away?.name;
       const apiCountry = match?.league?.country || '';
       const apiTimestamp = match?.fixture?.timestamp;
+      const apiStatus = match?.fixture?.status?.short;
 
-      const apiKey = `${normalize(apiTeam1)}_${normalize(apiTeam2)}`;
+      if (!apiTeam1 || !apiTeam2 || !apiStatus) continue;
 
       for (const tip of tips) {
         const team1Match = isMatch(apiTeam1, tip.team1);
         const team2Match = isMatch(apiTeam2, tip.team2);
-
-        const isSameCountry =
-          normalize(apiCountry) === normalize(tip.country) || tip.country === '';
-        const isSameTime =
-          !tip.time ||
-          Math.abs((tip.time * 1000 || 0) - (apiTimestamp * 1000)) < 90 * 60 * 1000; // within 90 mins
+        const isSameCountry = normalize(apiCountry) === normalize(tip.country) || tip.country === '';
+        const isSameTime = !tip.time ||
+          Math.abs((tip.time * 1000) - (apiTimestamp * 1000)) < 90 * 60 * 1000;
 
         if (team1Match && team2Match && isSameCountry && isSameTime) {
-          matchedScores.push(match);
-          break; // prevent duplicate push
+          matchedMap.set(match.fixture.id, match);
+          break;
         }
       }
     }
 
-    await db.ref('liveScores').set(matchedScores);
-    console.log(`✅ Synced ${matchedScores.length} matches at ${new Date().toLocaleTimeString()}`);
+    // Also preserve previously saved liveScores that are still in tips
+    const oldSnap = await db.ref('liveScores').once('value');
+    const oldData = Array.isArray(oldSnap.val()) ? oldSnap.val() : [];
+
+    for (const match of oldData) {
+      const apiTeam1 = match?.teams?.home?.name;
+      const apiTeam2 = match?.teams?.away?.name;
+
+      for (const tip of tips) {
+        const team1Match = isMatch(apiTeam1, tip.team1);
+        const team2Match = isMatch(apiTeam2, tip.team2);
+        if (team1Match && team2Match) {
+          matchedMap.set(match.fixture?.id, match);
+          break;
+        }
+      }
+    }
+
+    const finalScores = Array.from(matchedMap.values());
+
+    await db.ref('liveScores').set(finalScores);
+    console.log(`✅ Synced ${finalScores.length} scores at ${new Date().toLocaleTimeString()}`);
   } catch (err) {
     console.error('❌ Score Sync Failed:', err.message);
   }
 };
 
-// Refresh every minute
+// Run every minute
 setInterval(fetchLiveScores, 60 * 1000);
