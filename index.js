@@ -11,66 +11,80 @@ const db = admin.database();
 
 const normalize = (str) => str?.toLowerCase().trim() || '';
 
-// Step 1: Get all tips
-const getAllTipMatches = async () => {
+// Fetch team1_team2 keys from all tips
+const getAllTipMatchKeys = async () => {
   const snapshot = await db.ref('tips').once('value');
-  const tips = snapshot.val() || {};
-  const matches = [];
+  const tipsData = snapshot.val() || {};
+  const matchKeys = new Set();
 
-  for (const section in tips) {
-    for (const key in tips[section]) {
-      const tip = tips[section][key];
+  for (const sectionKey in tipsData) {
+    const tips = Object.values(tipsData[sectionKey] || {});
+    for (const tip of tips) {
       const team1 = normalize(tip.team1);
       const team2 = normalize(tip.team2);
       if (team1 && team2) {
-        matches.push({ team1, team2 });
+        matchKeys.add(`${team1}_${team2}`);
       }
     }
   }
 
-  return matches;
+  return matchKeys;
 };
 
-const fetchScores = async () => {
+const fetchLiveScores = async () => {
   try {
-    const tips = await getAllTipMatches();
+    const tipMatchKeys = await getAllTipMatchKeys();
 
-    // 🔁 Fetch BOTH live and recently finished matches
-    const response = await fetch(
-      'https://api-football-v1.p.rapidapi.com/v3/fixtures?next=100&live=all',
-      {
-        method: 'GET',
-        headers: {
-          'X-RapidAPI-Key': process.env.RAPIDAPI_KEY,
-          'X-RapidAPI-Host': 'api-football-v1.p.rapidapi.com',
-        },
-      }
-    );
+    if (tipMatchKeys.size === 0) {
+      console.log('🛑 No tips found. Clearing liveScores.');
+      await db.ref('liveScores').remove();
+      return;
+    }
+
+    // Fetch all today matches (live + finished)
+    const response = await fetch('https://api-football-v1.p.rapidapi.com/v3/fixtures?date=2025-06-18', {
+      method: 'GET',
+      headers: {
+        'X-RapidAPI-Key': process.env.RAPIDAPI_KEY,
+        'X-RapidAPI-Host': 'api-football-v1.p.rapidapi.com',
+      },
+    });
 
     const result = await response.json();
-    const fixtures = result?.response || [];
+    const matches = Array.isArray(result.response) ? result.response : [];
 
-    const filtered = [];
+    const liveMap = new Map();
 
-    for (const match of fixtures) {
-      const apiTeam1 = normalize(match?.teams?.home?.name);
-      const apiTeam2 = normalize(match?.teams?.away?.name);
+    // Keep old ones that still match tip keys
+    const existingSnap = await db.ref('liveScores').once('value');
+    const existing = Array.isArray(existingSnap.val()) ? existingSnap.val() : [];
 
-      const found = tips.find(
-        (tip) =>
-          apiTeam1.includes(tip.team1) && apiTeam2.includes(tip.team2)
-      );
-
-      if (found) {
-        filtered.push(match);
+    for (const match of existing) {
+      const team1 = normalize(match?.teams?.home?.name);
+      const team2 = normalize(match?.teams?.away?.name);
+      const key = `${team1}_${team2}`;
+      if (tipMatchKeys.has(key)) {
+        liveMap.set(match.fixture?.id, match);
       }
     }
 
-    await db.ref('liveScores').set(filtered);
-    console.log(`✅ Synced ${filtered.length} scores at ${new Date().toLocaleTimeString()}`);
-  } catch (err) {
-    console.error('❌ Score Sync Failed:', err.message);
+    // Add new ones (live or finished) from today's API
+    for (const match of matches) {
+      const team1 = normalize(match?.teams?.home?.name);
+      const team2 = normalize(match?.teams?.away?.name);
+      const key = `${team1}_${team2}`;
+      if (tipMatchKeys.has(key)) {
+        liveMap.set(match.fixture?.id, match);
+      }
+    }
+
+    const finalScores = Array.from(liveMap.values());
+
+    await db.ref('liveScores').set(finalScores);
+    console.log(`✅ Synced ${finalScores.length} matches at ${new Date().toLocaleTimeString()}`);
+  } catch (error) {
+    console.error('❌ Error during score sync:', error.message);
   }
 };
 
-setInterval(fetchScores, 60 * 1000);
+setInterval(fetchLiveScores, 60 * 1000);
