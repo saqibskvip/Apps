@@ -9,40 +9,39 @@ admin.initializeApp({
 
 const db = admin.database();
 
-// Normalize names for matching
-const normalize = (str) => str?.toLowerCase().replace(/\s+/g, '').trim() || '';
+const normalize = (str) => str?.toLowerCase().trim() || '';
 
-// Load all tips to prepare matching
+// Fetch team1_team2 keys from all tips
 const getAllTipMatchKeys = async () => {
   const snapshot = await db.ref('tips').once('value');
   const tipsData = snapshot.val() || {};
-  const matchTips = [];
+  const matchKeys = new Set();
 
   for (const sectionKey in tipsData) {
     const tips = Object.values(tipsData[sectionKey] || {});
     for (const tip of tips) {
       const team1 = normalize(tip.team1);
       const team2 = normalize(tip.team2);
-      const time = tip.time;
-      const country = tip.country || '';
       if (team1 && team2) {
-        matchTips.push({ team1, team2, time, country });
+        matchKeys.add(`${team1}_${team2}`);
       }
     }
   }
 
-  return matchTips;
+  return matchKeys;
 };
 
-// Loose contains match
-const isMatch = (apiName, tipName) =>
-  normalize(apiName).includes(tipName) || tipName.includes(normalize(apiName));
-
-// Main fetcher
 const fetchLiveScores = async () => {
   try {
-    const tips = await getAllTipMatchKeys();
+    const tipMatchKeys = await getAllTipMatchKeys();
 
+    if (tipMatchKeys.size === 0) {
+      console.log('🛑 No tips found. Clearing liveScores.');
+      await db.ref('liveScores').remove();
+      return;
+    }
+
+    // Fetch all today matches (live + finished)
     const response = await fetch('https://api-football-v1.p.rapidapi.com/v3/fixtures?date=2025-06-18', {
       method: 'GET',
       headers: {
@@ -52,59 +51,40 @@ const fetchLiveScores = async () => {
     });
 
     const result = await response.json();
-    const allMatches = Array.isArray(result.response) ? result.response : [];
+    const matches = Array.isArray(result.response) ? result.response : [];
 
-    const matchedMap = new Map();
+    const liveMap = new Map();
 
-    for (const match of allMatches) {
-      const apiTeam1 = match?.teams?.home?.name;
-      const apiTeam2 = match?.teams?.away?.name;
-      const apiCountry = match?.league?.country || '';
-      const apiTimestamp = match?.fixture?.timestamp;
-      const apiStatus = match?.fixture?.status?.short;
+    // Keep old ones that still match tip keys
+    const existingSnap = await db.ref('liveScores').once('value');
+    const existing = Array.isArray(existingSnap.val()) ? existingSnap.val() : [];
 
-      if (!apiTeam1 || !apiTeam2 || !apiStatus) continue;
-
-      for (const tip of tips) {
-        const team1Match = isMatch(apiTeam1, tip.team1);
-        const team2Match = isMatch(apiTeam2, tip.team2);
-        const isSameCountry = normalize(apiCountry) === normalize(tip.country) || tip.country === '';
-        const isSameTime = !tip.time ||
-          Math.abs((tip.time * 1000) - (apiTimestamp * 1000)) < 90 * 60 * 1000;
-
-        if (team1Match && team2Match && isSameCountry && isSameTime) {
-          matchedMap.set(match.fixture.id, match);
-          break;
-        }
+    for (const match of existing) {
+      const team1 = normalize(match?.teams?.home?.name);
+      const team2 = normalize(match?.teams?.away?.name);
+      const key = `${team1}_${team2}`;
+      if (tipMatchKeys.has(key)) {
+        liveMap.set(match.fixture?.id, match);
       }
     }
 
-    // Also preserve previously saved liveScores that are still in tips
-    const oldSnap = await db.ref('liveScores').once('value');
-    const oldData = Array.isArray(oldSnap.val()) ? oldSnap.val() : [];
-
-    for (const match of oldData) {
-      const apiTeam1 = match?.teams?.home?.name;
-      const apiTeam2 = match?.teams?.away?.name;
-
-      for (const tip of tips) {
-        const team1Match = isMatch(apiTeam1, tip.team1);
-        const team2Match = isMatch(apiTeam2, tip.team2);
-        if (team1Match && team2Match) {
-          matchedMap.set(match.fixture?.id, match);
-          break;
-        }
+    // Add new ones (live or finished) from today's API
+    for (const match of matches) {
+      const team1 = normalize(match?.teams?.home?.name);
+      const team2 = normalize(match?.teams?.away?.name);
+      const key = `${team1}_${team2}`;
+      if (tipMatchKeys.has(key)) {
+        liveMap.set(match.fixture?.id, match);
       }
     }
 
-    const finalScores = Array.from(matchedMap.values());
+    const finalScores = Array.from(liveMap.values());
 
     await db.ref('liveScores').set(finalScores);
-    console.log(`✅ Synced ${finalScores.length} scores at ${new Date().toLocaleTimeString()}`);
-  } catch (err) {
-    console.error('❌ Score Sync Failed:', err.message);
+    console.log(`✅ Synced ${finalScores.length} matches at ${new Date().toLocaleTimeString()}`);
+  } catch (error) {
+    console.error('❌ Error during score sync:', error.message);
   }
 };
 
-// Run every minute
 setInterval(fetchLiveScores, 60 * 1000);
